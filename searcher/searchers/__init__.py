@@ -7,15 +7,24 @@ from enum import Enum
 from .base import BaseSearcher
 from .bm25_searcher import BM25Searcher
 from .custom_searcher import CustomSearcher
-from .faiss_searcher import FaissSearcher, ReasonIrSearcher
+
+
+def _get_faiss_searcher():
+    from .faiss_searcher import FaissSearcher
+    return FaissSearcher
+
+
+def _get_reasonir_searcher():
+    from .faiss_searcher import ReasonIrSearcher
+    return ReasonIrSearcher
 
 
 class SearcherType(Enum):
     """Enum for managing available searcher types and their CLI mappings."""
 
     BM25 = ("bm25", BM25Searcher)
-    FAISS = ("faiss", FaissSearcher)
-    REASONIR = ("reasonir", ReasonIrSearcher)
+    FAISS = ("faiss", _get_faiss_searcher)
+    REASONIR = ("reasonir", _get_reasonir_searcher)
     CUSTOM = (
         "custom",
         CustomSearcher,
@@ -35,7 +44,11 @@ class SearcherType(Enum):
         """Get searcher class by CLI name."""
         for searcher_type in cls:
             if searcher_type.cli_name == cli_name:
-                return searcher_type.searcher_class
+                cls_or_loader = searcher_type.searcher_class
+                # Call lazy loader functions on demand
+                if callable(cls_or_loader) and not isinstance(cls_or_loader, type):
+                    return cls_or_loader()
+                return cls_or_loader
         raise ValueError(f"Unknown searcher type: {cli_name}")
 
 
