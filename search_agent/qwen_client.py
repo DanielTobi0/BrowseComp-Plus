@@ -1,9 +1,11 @@
 import argparse
+import concurrent.futures
 import csv
 import json
 import os
 import re
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -196,13 +198,23 @@ def _process_tsv_dataset(tsv_path: str, agent: Assistant, args):
 
     print(
         f"Processing {len(remaining)} remaining queries (skipping {len(processed_ids)}) from {dataset_path} …"
+        f" [workers={args.workers}]"
     )
 
-    for qid, qtext in tqdm(remaining, desc="Queries", unit="query"):
+    progress = tqdm(total=len(remaining), desc="Queries", unit="query")
+    progress_lock = threading.Lock()
+
+    def _run_one(item):
+        qid, qtext = item
+        worker_agent = init_qwen_agent(
+            model=args.model,
+            model_server=args.model_server,
+            mcp_url=args.mcp_url,
+            max_tokens=args.max_tokens,
+        )
         messages = build_messages(
             query=qtext, system_prompt=args.system, query_template=args.query_template
         )
-
         request_config = {
             "model": args.model,
             "model_server": args.model_server,
@@ -211,15 +223,21 @@ def _process_tsv_dataset(tsv_path: str, agent: Assistant, args):
             "messages": messages,
             "query_template": args.query_template,
         }
-
         try:
             response = []
-            for response_chunk in agent.run(messages=messages):
+            for response_chunk in worker_agent.run(messages=messages):
                 response = response_chunk
-
             _persist_response(out_dir, request_config, response, query_id=qid)
         except Exception as exc:
             print(f"[Error] Query id={qid} failed: {exc}")
+        finally:
+            with progress_lock:
+                progress.update(1)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+        list(pool.map(_run_one, remaining))
+
+    progress.close()
 
 
 def main():
@@ -259,6 +277,12 @@ def main():
         choices=["QUERY_TEMPLATE", "QUERY_TEMPLATE_NO_GET_DOCUMENT"],
         default="QUERY_TEMPLATE_NO_GET_DOCUMENT",
         help="Specify the query template to use (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of parallel query workers (default: %(default)s)",
     )
     parser.add_argument(
         "--output-dir",
