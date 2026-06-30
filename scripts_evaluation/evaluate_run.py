@@ -1,6 +1,8 @@
 import argparse
+import concurrent.futures
 import csv
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -10,7 +12,6 @@ from typing import Dict, List, Optional
 
 import numpy as np
 from tqdm import tqdm
-from vllm import LLM, SamplingParams
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -317,6 +318,7 @@ def compute_citation_metrics(
 def save_detailed_csv(all_results: List[dict], output_dir: Path):
     csv_path = output_dir / "detailed_judge_results.csv"
 
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         fieldnames = [
             "query_id",
@@ -375,6 +377,46 @@ def save_detailed_csv(all_results: List[dict], output_dir: Path):
     return csv_path
 
 
+def run_together_inference(
+    prompts: List[str],
+    model: str,
+    api_key: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    num_workers: int = 8,
+) -> List[str]:
+    from together import Together
+
+    client = Together(api_key=api_key)
+
+    def _call(prompt: str) -> str:
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            )
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            print(f"[Together error] {e}")
+            return ""
+
+    results = [None] * len(prompts)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        future_to_idx = {executor.submit(_call, p): i for i, p in enumerate(prompts)}
+        for future in tqdm(
+            concurrent.futures.as_completed(future_to_idx),
+            total=len(prompts),
+            desc="Together API calls",
+            unit="req",
+        ):
+            results[future_to_idx[future]] = future.result()
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate browsecomp responses using Qwen judge model."
@@ -425,7 +467,22 @@ def main():
         default=1,
         help="Tensor parallel size for vLLM",
     )
+    parser.add_argument(
+        "--together-api-key",
+        type=str,
+        default=None,
+        help="Together AI API key. If provided (or TOGETHER_API_KEY env var is set), "
+             "uses Together AI instead of local vLLM.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=8,
+        help="Parallel workers for Together AI API calls (default: 8)",
+    )
     args = parser.parse_args()
+
+    args.together_api_key = args.together_api_key or os.getenv("TOGETHER_API_KEY")
 
     input_dir = Path(args.input_dir)
     eval_dir = Path(args.eval_dir)
@@ -456,14 +513,21 @@ def main():
 
     all_results = []
 
-    # Initialize vLLM engine and sampling params
-    llm = LLM(model=args.model, tensor_parallel_size=args.tensor_parallel_size)
-    sampling_params = SamplingParams(
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        max_tokens=args.max_output_tokens,
-    )
+    # Initialize inference backend
+    if args.together_api_key:
+        print(f"Using Together AI judge: {args.model}")
+        llm = None
+        sampling_params = None
+    else:
+        from vllm import LLM, SamplingParams
+        print(f"Using local vLLM judge: {args.model}")
+        llm = LLM(model=args.model, tensor_parallel_size=args.tensor_parallel_size)
+        sampling_params = SamplingParams(
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            max_tokens=args.max_output_tokens,
+        )
 
     detected_model_name: Optional[str] = None
     first_run_path: Optional[Path] = json_files[0] if json_files else None
@@ -545,6 +609,7 @@ def main():
                 },
             }
             try:
+                eval_path.parent.mkdir(parents=True, exist_ok=True)
                 with eval_path.open("w", encoding="utf-8") as f:
                     json.dump(result, f, indent=2, ensure_ascii=False)
             except Exception as e:
@@ -568,31 +633,52 @@ def main():
             }
         )
 
-    for i in tqdm(
-        range(0, len(pending_items), args.batch_size), desc="Evaluating", unit="batch"
-    ):
-        batch = pending_items[i : i + args.batch_size]
-        messages_list = [
-            [{"role": "user", "content": item["judge_prompt"]}] for item in batch
-        ]
-        try:
-            outputs = llm.chat(
-                messages_list,
-                sampling_params,
-                chat_template_kwargs={"enable_thinking": False},
-            )
-        except Exception as e:
-            print(f"Error running vLLM batch {i}//{args.batch_size}: {e}")
-            continue
+    if args.together_api_key:
+        # Together AI: run all prompts in parallel, then process results
+        all_prompts = [item["judge_prompt"] for item in pending_items]
+        all_judge_texts = run_together_inference(
+            prompts=all_prompts,
+            model=args.model,
+            api_key=args.together_api_key,
+            max_tokens=args.max_output_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            num_workers=args.num_workers,
+        )
+        pending_with_texts = list(zip(pending_items, all_judge_texts))
+    else:
+        pending_with_texts = None  # handled in vllm loop below
 
-        for item, out in zip(batch, outputs or []):
-            judge_text = ""
+    if args.together_api_key:
+        items_and_texts = pending_with_texts
+    else:
+        items_and_texts = []
+        for i in tqdm(
+            range(0, len(pending_items), args.batch_size), desc="Evaluating", unit="batch"
+        ):
+            batch = pending_items[i : i + args.batch_size]
+            messages_list = [
+                [{"role": "user", "content": item["judge_prompt"]}] for item in batch
+            ]
             try:
-                if getattr(out, "outputs", None):
-                    judge_text = out.outputs[0].text or ""
-            except Exception:
+                outputs = llm.chat(
+                    messages_list,
+                    sampling_params,
+                    chat_template_kwargs={"enable_thinking": False},
+                )
+            except Exception as e:
+                print(f"Error running vLLM batch {i}//{args.batch_size}: {e}")
+                continue
+            for item, out in zip(batch, outputs or []):
                 judge_text = ""
+                try:
+                    if getattr(out, "outputs", None):
+                        judge_text = out.outputs[0].text or ""
+                except Exception:
+                    judge_text = ""
+                items_and_texts.append((item, judge_text))
 
+    for item, judge_text in items_and_texts:
             judge_result = parse_judge_response(judge_text)
             cited_docids = extract_citations_from_response(item["response"])
             citation_metrics_positives = compute_citation_metrics(
@@ -624,6 +710,7 @@ def main():
                 },
             }
             try:
+                item["eval_path"].parent.mkdir(parents=True, exist_ok=True)
                 with item["eval_path"].open("w", encoding="utf-8") as f:
                     json.dump(result, f, indent=2, ensure_ascii=False)
             except Exception as e:
@@ -807,6 +894,7 @@ def main():
     print(f"- Precision (avg): {precision_percent:.2f}%")
     print(f"- Recall (avg): {recall_citation_percent:.2f}%")
 
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     with summary_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
