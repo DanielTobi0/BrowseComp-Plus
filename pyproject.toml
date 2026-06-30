@@ -20,6 +20,7 @@ dependencies = [
     "qwen-omni-utils==0.0.8",
     "rich>=14.0.0",
     "tevatron",
+    "together>=2.19.0",
     "torchvision",
     "tqdm>=4.67.1",
     "transformers>=4.53.2",
