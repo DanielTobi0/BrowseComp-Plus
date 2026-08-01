@@ -12,3 +12,5 @@ runs/
 evals/
 hs_err_pid*.log
 test_custom_retriever.ipynb
+markdown_runs/
+.connector_secret

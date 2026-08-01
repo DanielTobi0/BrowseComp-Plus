@@ -63,6 +63,18 @@ def main():
             help="Port to bind the HTTP server when --transport=http (default: 8000). Ignored for stdio.",
         )
         parser.add_argument(
+            "--host",
+            type=str,
+            default="127.0.0.1",
+            help="Address to bind the HTTP server to (default: 127.0.0.1, i.e. reachable only from inside this machine/container). Ignored for stdio.",
+        )
+        parser.add_argument(
+            "--path",
+            type=str,
+            default="/mcp",
+            help="HTTP path the MCP endpoint is served on (default: /mcp). A secret path (e.g. /<random>/mcp) is the simplest way to gate a tunnelled server for clients that cannot send auth headers.",
+        )
+        parser.add_argument(
             "--public",
             action="store_true",
             help="If set with --transport=http, automatically create an ngrok tunnel and print the public MCP URL.",
@@ -104,6 +116,8 @@ def main():
         include_get_document = args.get_document
         transport = args.transport
         port = args.port
+        host = args.host
+        path = args.path
         public = args.public
 
         mcp = FastMCP(name="search-server")
@@ -128,7 +142,7 @@ def main():
 
                 try:
                     tunnel = ngrok.connect(addr=port, bind_tls=True)
-                    public_url = f"{tunnel.public_url}/mcp"
+                    public_url = f"{tunnel.public_url}{path}"
                     print(
                         "\n=============================================\n"
                         f"Public MCP endpoint available at: {public_url}\n"
@@ -149,7 +163,8 @@ def main():
         if transport == "stdio":
             mcp.run(transport="stdio")
         else:
-            mcp.run(transport=transport, path="/mcp", port=port)
+            print(f"Serving MCP on http://{host}:{port}{path}")
+            mcp.run(transport=transport, host=host, path=path, port=port)
 
     except Exception as e:
         print("Error", e)
