@@ -10,3 +10,5 @@ data/browsecomp_plus_decrypted.jsonl
 topics-qrels/queries.tsv
 runs/
 evals/
+hs_err_pid*.log
+test_custom_retriever.ipynb

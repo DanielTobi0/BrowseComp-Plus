@@ -1,16 +1,18 @@
 import argparse
 import csv
 import json
+import os
 import re
 import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
+import openai
 from tqdm import tqdm
-from vllm import LLM, SamplingParams
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -417,13 +419,18 @@ def main():
         help="Path to qrel positives file",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=64, help="Batch size for vLLM chat calls"
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Number of concurrent judge requests in flight at once",
     )
     parser.add_argument(
-        "--tensor_parallel_size",
-        type=int,
-        default=1,
-        help="Tensor parallel size for vLLM",
+        "--model-url", default="http://localhost:8000/v1", help="Judge model URL"
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("VLLM_API_KEY", "EMPTY"),
+        help="API key / bearer token for the judge model server (default: $VLLM_API_KEY or 'EMPTY')",
     )
     args = parser.parse_args()
 
@@ -456,14 +463,7 @@ def main():
 
     all_results = []
 
-    # Initialize vLLM engine and sampling params
-    llm = LLM(model=args.model, tensor_parallel_size=args.tensor_parallel_size)
-    sampling_params = SamplingParams(
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        max_tokens=args.max_output_tokens,
-    )
+    client = openai.OpenAI(base_url=args.model_url, api_key=args.api_key)
 
     detected_model_name: Optional[str] = None
     first_run_path: Optional[Path] = json_files[0] if json_files else None
@@ -568,30 +568,37 @@ def main():
             }
         )
 
-    for i in tqdm(
-        range(0, len(pending_items), args.batch_size), desc="Evaluating", unit="batch"
-    ):
-        batch = pending_items[i : i + args.batch_size]
-        messages_list = [
-            [{"role": "user", "content": item["judge_prompt"]}] for item in batch
-        ]
+    def _call_judge(judge_prompt: str) -> str:
         try:
-            outputs = llm.chat(
-                messages_list,
-                sampling_params,
-                chat_template_kwargs={"enable_thinking": False},
+            response = client.chat.completions.create(
+                model=args.model,
+                messages=[{"role": "user", "content": judge_prompt}],
+                temperature=args.temperature,
+                top_p=args.top_p,
+                max_tokens=args.max_output_tokens,
+                extra_body={
+                    "top_k": args.top_k,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
             )
+            return response.choices[0].message.content or ""
         except Exception as e:
-            print(f"Error running vLLM batch {i}//{args.batch_size}: {e}")
-            continue
+            print(f"Error calling judge model: {e}")
+            return ""
 
-        for item, out in zip(batch, outputs or []):
-            judge_text = ""
-            try:
-                if getattr(out, "outputs", None):
-                    judge_text = out.outputs[0].text or ""
-            except Exception:
-                judge_text = ""
+    with ThreadPoolExecutor(max_workers=args.batch_size) as executor:
+        future_to_item = {
+            executor.submit(_call_judge, item["judge_prompt"]): item
+            for item in pending_items
+        }
+        for future in tqdm(
+            as_completed(future_to_item),
+            total=len(pending_items),
+            desc="Evaluating",
+            unit="query",
+        ):
+            item = future_to_item[future]
+            judge_text = future.result()
 
             judge_result = parse_judge_response(judge_text)
             cited_docids = extract_citations_from_response(item["response"])

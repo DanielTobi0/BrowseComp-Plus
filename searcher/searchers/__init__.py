@@ -6,7 +6,7 @@ from enum import Enum
 
 from .base import BaseSearcher
 from .bm25_searcher import BM25Searcher
-from .custom_searcher import CustomSearcher
+from .custom_searcher import CustomSearcher, HybridSearcher
 from .faiss_searcher import FaissSearcher, ReasonIrSearcher
 
 

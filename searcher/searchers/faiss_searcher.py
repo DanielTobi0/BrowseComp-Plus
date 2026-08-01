@@ -6,6 +6,7 @@ import glob
 import logging
 import os
 import pickle
+import threading
 from itertools import chain
 from typing import Any, Dict, List, Optional
 
@@ -22,6 +23,12 @@ from transformers import AutoModel, AutoTokenizer
 from .base import BaseSearcher
 
 logger = logging.getLogger(__name__)
+
+# Query threads share one embedding model + one reranker on a single GPU
+# (oss_client.py runs queries via a ThreadPoolExecutor). Without this, concurrent
+# unsynchronized forward passes each hold their own activation memory at the same
+# time and can OOM even though the models themselves fit comfortably.
+GPU_INFERENCE_LOCK = threading.Lock()
 
 
 class FaissSearcher(BaseSearcher):
@@ -161,6 +168,7 @@ class FaissSearcher(BaseSearcher):
             normalize=self.args.normalize,
             pooling=self.args.pooling,
             cache_dir=cache_dir,
+            attn_implementation="sdpa",
         )
 
         if self.args.torch_dtype == "float16":
@@ -263,10 +271,11 @@ class FaissSearcher(BaseSearcher):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         batch_dict = {k: v.to(device) for k, v in batch_dict.items()}
 
-        with torch.amp.autocast(device):
-            with torch.no_grad():
-                q_reps = self.model.encode_query(batch_dict)
-                q_reps = q_reps.cpu().detach().numpy()
+        with GPU_INFERENCE_LOCK:
+            with torch.amp.autocast(device):
+                with torch.no_grad():
+                    q_reps = self.model.encode_query(batch_dict)
+                    q_reps = q_reps.cpu().detach().numpy()
 
         all_scores, psg_indices = self.retriever.search(q_reps, k)
 

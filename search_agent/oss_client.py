@@ -461,6 +461,11 @@ def main():
     parser.add_argument(
         "--model-url", default="http://localhost:8000/v1", help="Model URL"
     )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("VLLM_API_KEY", "EMPTY"),
+        help="API key / bearer token for the model server (default: $VLLM_API_KEY or 'EMPTY')",
+    )
 
     # Searcher selection and shared tool options --------------------------
     parser.add_argument(
@@ -507,7 +512,7 @@ def main():
 
     client = openai.OpenAI(
         base_url=args.model_url,
-        api_key="EMPTY",
+        api_key=args.api_key,
     )
 
     searcher = searcher_class(args)

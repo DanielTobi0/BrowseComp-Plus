@@ -11,10 +11,14 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import openai
+from dotenv import load_dotenv
+from openai import AzureOpenAI
 from tqdm import tqdm
 
 sys.path.append(str(Path(__file__).parent.parent))
 from search_agent.prompts import GRADER_TEMPLATE
+
+load_dotenv()
 
 
 def load_ground_truth(jsonl_path: Path) -> Dict[str, Dict[str, str]]:
@@ -41,23 +45,20 @@ def call_openai_judge(
     prompt: str,
     model: str,
     max_output_tokens: int,
-    reasoning_effort: Optional[str] = None,
     system_prompt: Optional[str] = None,
-) -> dict:
-    body = {
-        "model": model,
-        "max_output_tokens": max_output_tokens,
-        "input": prompt,
-    }
-
+) -> str:
+    messages = []
     if system_prompt:
-        body["instructions"] = system_prompt
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
 
-    if reasoning_effort is not None:
-        body["reasoning"] = {"effort": reasoning_effort, "summary": "detailed"}
-
-    response = client.responses.create(**body)
-    return response
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0,
+        max_tokens=max_output_tokens,
+    )
+    return response.choices[0].message.content or ""
 
 
 def parse_judge_response(judge_response: str) -> dict:
@@ -393,7 +394,6 @@ def main():
     parser.add_argument(
         "--eval_dir", default="./evals", help="Directory to store evaluation results"
     )
-    parser.add_argument("--model", default="gpt-4.1", help="OpenAI model for judging")
     parser.add_argument(
         "--max_output_tokens",
         type=int,
@@ -441,11 +441,17 @@ def main():
     all_results = []
     skipped = 0
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set in environment")
+    azure_api_key = os.environ["AZURE_OPENAI_API_KEY"]
+    azure_endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
+    azure_deployment = os.environ["AZURE_OPENAI_DEPLOYMENT"]
+    azure_api_version = os.environ["AZURE_OPENAI_API_VERSION"]
 
-    client = openai.OpenAI(api_key=api_key)
+    client = AzureOpenAI(
+        api_key=azure_api_key,
+        api_version=azure_api_version,
+        azure_endpoint=azure_endpoint,
+    )
+    args.model = azure_deployment  # Azure requires the deployment name as the "model"
 
     detected_model_name: Optional[str] = None
     first_run_path: Optional[Path] = json_files[0] if json_files else None
@@ -541,17 +547,11 @@ def main():
         judge_prompt = create_judge_prompt(gt_question, response, correct_answer)
 
         try:
-            judge_response = call_openai_judge(
+            judge_text = call_openai_judge(
                 client,
                 judge_prompt,
                 args.model,
                 args.max_output_tokens,
-            )
-
-            judge_text = (
-                judge_response.output_text
-                if hasattr(judge_response, "output_text")
-                else ""
             )
 
             judge_result = parse_judge_response(judge_text)

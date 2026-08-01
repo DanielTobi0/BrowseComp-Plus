@@ -20,11 +20,18 @@ dependencies = [
     "qwen-omni-utils==0.0.8",
     "rich>=14.0.0",
     "tevatron",
+    "torch",
     "torchvision",
     "tqdm>=4.67.1",
     "transformers>=4.53.2",
-    "vllm>=0.9.0",
 ]
 
 [tool.uv.sources]
 tevatron = { git = "https://github.com/texttron/tevatron.git", rev = "main" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
