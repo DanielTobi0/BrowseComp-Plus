@@ -11,6 +11,6 @@ topics-qrels/queries.tsv
 runs/
 evals/
 hs_err_pid*.log
-test_custom_retriever.ipynb
+corpus_documents.ipynb
 markdown_runs/
 .connector_secret
